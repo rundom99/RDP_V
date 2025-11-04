@@ -6,7 +6,7 @@ on:
 jobs:
   secure-rdp:
     runs-on: windows-latest
-    timeout-minutes: 1440   # 24 hours - عدّلها إذا أردت وقت أطول
+    timeout-minutes: 1440
 
     steps:
       - name: Check required secrets
@@ -25,24 +25,16 @@ jobs:
       - name: Configure Core RDP Settings
         shell: powershell
         run: |
-          # Enable Remote Desktop and disable NLA for compatibility (testing)
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
-            -Name "fDenyTSConnections" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-            -Name "UserAuthentication" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-            -Name "SecurityLayer" -Value 0 -Force
-
-          # Firewall: allow RDP 3389
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 0 -Force
           netsh advfirewall firewall delete rule name="RDP-Tailscale" | Out-Null
           netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389 profile=any
-
-          # Ensure service running
           Set-Service -Name TermService -StartupType Automatic
           Restart-Service -Name TermService -Force
           Write-Host "RDP configured and firewall rule added."
 
-      - name: Create or update RDP user using GitHub Secret (no printing)
+      - name: Create or update RDP user using GitHub Secret
         shell: powershell
         env:
           RDP_PLAIN: ${{ secrets.RDP_PASSWORD }}
@@ -53,36 +45,22 @@ jobs:
             exit 1
           }
 
-          # Basic complexity check (>=8, upper, lower, digit)
           $pattern = '^(?=.{8,})(?=.*[a-z])(?=.*[A-Z])(?=.*\d).*$'
           if ($pwdPlain -notmatch $pattern) {
             Write-Error "RDP_PASSWORD does not meet complexity. Use >=8 chars, include upper, lower, digit."
             exit 1
           }
 
-          try {
-            $securePass = ConvertTo-SecureString $pwdPlain -AsPlainText -Force
-          } catch {
-            Write-Error "Could not convert password to SecureString"
-            exit 1
-          }
+          $securePass = ConvertTo-SecureString $pwdPlain -AsPlainText -Force
 
-          try {
-            if (Get-LocalUser -Name "RDP" -ErrorAction SilentlyContinue) {
-              Set-LocalUser -Name "RDP" -Password $securePass
-              Write-Host "Updated RDP user password."
-            } else {
-              New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires
-              Add-LocalGroupMember -Group "Administrators" -Member "RDP"
-              Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP"
-              Write-Host "Created RDP user."
-            }
-          } catch [Microsoft.PowerShell.Commands.InvalidPasswordException] {
-            Write-Error "InvalidPasswordException: provided password rejected by Windows policy."
-            exit 1
-          } catch {
-            Write-Error "Failed to create/update RDP user: $_"
-            exit 1
+          if (Get-LocalUser -Name "RDP" -ErrorAction SilentlyContinue) {
+            Set-LocalUser -Name "RDP" -Password $securePass
+            Write-Host "Updated RDP user password."
+          } else {
+            New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires
+            Add-LocalGroupMember -Group "Administrators" -Member "RDP"
+            Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP"
+            Write-Host "Created RDP user."
           }
 
           "RDP_USER=RDP" >> $env:GITHUB_ENV
@@ -97,13 +75,12 @@ jobs:
           Remove-Item $installerPath -Force
           Write-Host "Tailscale installed."
 
-      - name: Establish Tailscale Connection (fixed hostname: codevertox)
+      - name: Establish Tailscale Connection
         shell: powershell
         run: |
           $hostname = "codevertox"
           & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=$hostname --accept-dns=true --accept-routes=true
           Write-Host "Tailscale up requested (hostname: $hostname). Waiting for IP..."
-
           $tsIP = $null
           $retries = 0
           while (-not $tsIP -and $retries -lt 15) {
@@ -112,59 +89,35 @@ jobs:
             Start-Sleep -Seconds 4
             $retries++
           }
-
           if (-not $tsIP) {
             Write-Error "Tailscale IP not assigned after retries."
             exit 1
           }
-
-          # extract MagicDNS FQDN if available
-          $dnsName = ""
-          $statusJson = (& "$env:ProgramFiles\Tailscale\tailscale.exe" status --json) 2>$null
-          if ($statusJson) {
-            try { $js = $statusJson | ConvertFrom-Json; $dnsName = $js.Self.DNSName } catch {}
-          }
-
           "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
-          "TAILSCALE_FQDN=$dnsName" >> $env:GITHUB_ENV
           Write-Host "Tailscale IP: $tsIP"
-          if ($dnsName) { Write-Host "Tailscale FQDN: $dnsName" } else { Write-Host "No FQDN detected (MagicDNS may be disabled)." }
 
-      - name: Verify RDP Accessibility (try FQDN then IP)
+      - name: Verify RDP Accessibility
         shell: powershell
         run: |
-          $ok = $false
-          if ($env:TAILSCALE_FQDN) {
-            Write-Host "Testing via FQDN: $env:TAILSCALE_FQDN"
-            $r = Test-NetConnection -ComputerName $env:TAILSCALE_FQDN -Port 3389 -WarningAction SilentlyContinue
-            if ($r.TcpTestSucceeded) { $ok = $true; Write-Host "Connectivity OK via FQDN" }
-          } else {
-            Write-Host "FQDN not present in env; skipping FQDN test."
-          }
-
-          if (-not $ok) {
-            Write-Host "Testing via IP: $env:TAILSCALE_IP"
-            $r2 = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389 -WarningAction SilentlyContinue
-            if ($r2.TcpTestSucceeded) { $ok = $true; Write-Host "Connectivity OK via IP" }
-          }
-
-          if (-not $ok) {
-            Write-Error "TCP connection to RDP port 3389 failed (via FQDN and IP)."
+          $r = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389 -WarningAction SilentlyContinue
+          if (-not $r.TcpTestSucceeded) {
+            Write-Error "TCP connection to RDP port 3389 failed."
             exit 1
+          } else {
+            Write-Host "Connectivity OK via IP."
           }
 
       - name: Print connection info and keep alive
         shell: powershell
         run: |
-          $displayFqdn = if ($env:TAILSCALE_FQDN) { $env:TAILSCALE_FQDN } else { "codevertox.tail622336.ts.net" }
           Write-Host ""
           Write-Host "=== RDP ACCESS INFO ==="
-          Write-Host "Address : $displayFqdn"
+          Write-Host "Address : codevertox.tail622336.ts.net"
           Write-Host "IP      : $env:TAILSCALE_IP"
-          Write-Host "User    : $env:RDP_USER"
+          Write-Host "User    : RDP"
           Write-Host "Password: (use your GitHub secret RDP_PASSWORD)"
           Write-Host "========================"
           while ($true) {
-            Write-Host "[$(Get-Date -Format o)] RDP active (workflow) — press Ctrl+C to stop"
+            Write-Host "[$(Get-Date -Format o)] RDP active..."
             Start-Sleep -Seconds 300
           }
