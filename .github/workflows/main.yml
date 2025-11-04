@@ -46,7 +46,7 @@ jobs:
             Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP"
           }
 
-          "RDP_USER=RDP" >> $env:GITHUB_ENV
+          "RDP_USER=RDP" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       - name: Install Tailscale
         shell: powershell
@@ -60,8 +60,7 @@ jobs:
       - name: Establish Tailscale Connection
         shell: powershell
         run: |
-          $hostname = "codevertox"
-          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=$hostname
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }}
 
           # Wait for Tailscale IP
           $tsIP = $null
@@ -79,7 +78,7 @@ jobs:
 
           Write-Host "✅ Tailscale Connected!"
           Write-Host "🔹 Your RDP IP: $tsIP"
-          "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
+          "TAILSCALE_IP=$tsIP" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       - name: Verify RDP Accessibility
         shell: powershell
